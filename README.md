@@ -1,7 +1,8 @@
 // Author: Daniel J. Dillberg
 // =====================================================
-// DVSM SYSTEM SPECIFICATION SDK
+// DVSM SYSTEM SPECIFICATION SDK 
 // Deterministic Distributed Execution Architecture (G1–G6)
+// Environment Integration Capabilities
 // =====================================================
 //
 // THIS FILE DEFINES:
@@ -331,5 +332,217 @@ public final class DVSMTopologySnapshot {
 // It is:
 //
 // A structured execution substrate for verifiable distributed computation.
+//
+// =====================================================
+////
+// =====================================================
+// DVSM INTEGRATION GUIDE
+// Compatible Systems: Data Pipelines & Distributed Environments
+// =====================================================
+//
+// PURPOSE:
+// -------------------------------------
+// This document defines how DVSM integrates with external
+// distributed systems such as data pipelines, orchestration
+// engines, and cloud-native compute environments.
+//
+// DVSM does NOT replace these systems.
+// DVSM enforces deterministic execution beneath them.
+//
+// =====================================================
+
+import Foundation
+
+// =====================================================
+// MARK: - SYSTEM INTEGRATION PRINCIPLE
+// =====================================================
+//
+// DVSM operates as a deterministic execution substrate.
+//
+// External systems may:
+// - transport data
+// - schedule execution
+// - allocate compute resources
+//
+// BUT CANNOT:
+// - influence execution order (G3)
+// - modify state evolution (G4)
+// - alter commit roots
+// - override shard determinism (G5)
+//
+// =====================================================
+
+// =====================================================
+// MARK: - COMPATIBLE SYSTEM CLASSES
+// =====================================================
+
+public enum DVSMCompatibleSystemCategory {
+
+    /// Streaming + ingestion pipelines
+    case dataPipeline
+
+    /// Distributed compute frameworks
+    case distributedCompute
+
+    /// Workflow orchestration engines
+    case orchestration
+
+    /// Cloud-native infrastructure systems
+    case cloudInfrastructure
+
+    /// Event sourcing + audit systems
+    case eventSourcing
+
+    /// AI / vector processing systems
+    case aiPipeline
+}
+
+// =====================================================
+// MARK: - INTEGRATION MODEL
+// =====================================================
+
+public struct DVSMIntegrationModel {
+
+    /// External system role description
+    public let system: DVSMCompatibleSystemCategory
+
+    /// Allowed interaction surface
+    public let allowedInteractions: [String]
+
+    /// DVSM enforcement boundary
+    public let dvsmBoundary: String
+}
+
+// =====================================================
+// MARK: - SYSTEM ROLE SEPARATION
+// =====================================================
+//
+// External systems are responsible for:
+//
+// ✔ ingestion (data movement)
+// ✔ scheduling (execution triggers)
+// ✔ scaling (resource allocation)
+// ✔ transport (event delivery)
+//
+// -----------------------------------------------------
+//
+// DVSM is responsible for:
+//
+// ✔ deterministic execution (G2)
+// ✔ ordering enforcement (G3)
+// ✔ state evolution (G4)
+// ✔ commit generation
+// ✔ replayability guarantees
+//
+// =====================================================
+
+// =====================================================
+// MARK: - PIPELINE INTEGRATION MODEL
+// =====================================================
+//
+// Example: Data Pipeline → DVSM
+//
+// Step 1: External pipeline ingests raw events
+// Step 2: Events are forwarded to DVSM execution fabric
+// Step 3: DVSM enforces deterministic execution order
+// Step 4: State evolves via G4 ratchet model
+// Step 5: Commit root is produced and returned
+//
+// RESULT:
+// External system stores data,
+// DVSM defines correctness of computation.
+//
+// =====================================================
+
+// =====================================================
+// MARK: - EXTERNAL SYSTEM EXAMPLES
+// =====================================================
+
+public enum DVSMExternalSystemExample {
+
+    /// Kafka-style event streaming systems
+    case streamingLogSystem
+
+    /// Spark/Flink-style distributed processing
+    case batchAndStreamProcessor
+
+    /// Kubernetes-style orchestration
+    case containerScheduler
+
+    /// Serverless execution environments
+    case functionRuntime
+
+    /// Event-sourced persistence systems
+    case immutableLogStore
+
+    /// AI embedding / inference pipelines
+    case vectorProcessingSystem
+}
+
+// =====================================================
+// MARK: - ARCHITECTURAL CONSTRAINTS
+// =====================================================
+//
+// DVSM MUST NOT be influenced by:
+//
+// ❌ external scheduling decisions
+// ❌ runtime load balancing heuristics
+// ❌ probabilistic execution ordering
+// ❌ mutable shared state outside DVSM boundary
+//
+// -----------------------------------------------------
+//
+// DVSM GUARANTEES:
+//
+// ✔ deterministic execution order (G3)
+// ✔ identity-bound computation (G2 + G4)
+// ✔ replayable state transitions (G4)
+// ✔ shard-isolated execution (G5)
+//
+// =====================================================
+
+// =====================================================
+// MARK: - DEPLOYMENT TOPOLOGY MODEL
+// =====================================================
+//
+// Recommended architecture:
+//
+// External Layer:
+//     - Data pipeline (Kafka / ETL / streaming)
+//     - Orchestration (Kubernetes / Airflow)
+//     - Compute infrastructure
+//
+// DVSM Layer:
+//     - Execution Fabric (G2)
+//     - Sequencing (G3)
+//     - State Evolution (G4)
+//     - Control Plane (G5)
+//
+// Optional Layer:
+//     - Semantic Interpretation (G6)
+//
+// =====================================================
+
+// =====================================================
+// MARK: - INTEGRATION SUMMARY
+// =====================================================
+//
+// DVSM is:
+//
+// A deterministic execution core that sits beneath
+// distributed systems and ensures:
+//
+// - reproducible computation
+// - strict ordering guarantees
+// - cryptographically verifiable state transitions
+//
+// External systems remain responsible for:
+//
+// - moving data
+// - scheduling workloads
+// - managing infrastructure
+//
+// DVSM ensures that once execution begins,
+// results cannot diverge across environments.
 //
 // =====================================================
