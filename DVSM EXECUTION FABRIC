@@ -1,0 +1,394 @@
+//
+// =====================================================
+// DVSM EXECUTION FABRIC
+// =====================================================
+//
+// MERGE GROUP 2 — FINAL CONSOLIDATED VERSION
+//
+// KEY ADDITION:
+// -------------------------------------
+// ✔ ExecutionIdentity (CROSS-GROUP INVARIANT)
+// ✔ standardized ingestion boundary
+// ✔ lineage tracking hooks
+// ✔ DAG / consensus compatibility support
+//
+// DEPENDS ON:
+// -------------------------------------
+// Group 1: Kernel Specification
+// Group 3: Control Plane Orchestration
+// Group 4: Batch + Consensus ingestion
+// Group 5: DAG + Memory + Finalization
+//
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - CROSS-GROUP EXECUTION IDENTITY (NEW)
+// =====================================================
+
+public struct DVSMExecutionIdentity: Hashable, Codable {
+
+    public let id: UUID
+    public let shardID: String
+    public let sequence: UInt64
+    public let timestamp: UInt64
+
+    public init(
+        shardID: String,
+        sequence: UInt64,
+        timestamp: UInt64
+    ) {
+        self.id = UUID()
+        self.shardID = shardID
+        self.sequence = sequence
+        self.timestamp = timestamp
+    }
+}
+
+// =====================================================
+// MARK: - EXECUTION MODE
+// =====================================================
+
+public enum DVSMExecutionMode: UInt8 {
+    case strict
+    case hybrid
+    case adaptive
+}
+
+// =====================================================
+// MARK: - EXECUTION POLICY
+// =====================================================
+
+public struct DVSMExecutionPolicy {
+
+    public let maxInstability: Float
+    public let minConfidence: Float
+    public let minReliability: Float
+
+    public func validate(
+        instability: Float,
+        confidence: Float,
+        reliability: Float
+    ) -> Bool {
+        instability <= maxInstability &&
+        confidence >= minConfidence &&
+        reliability >= minReliability
+    }
+}
+
+// =====================================================
+// MARK: - INGESTION MODEL (NEW)
+// =====================================================
+
+public struct DVSMIngestEvent {
+
+    public let identity: DVSMExecutionIdentity
+    public let payload: DVSMVectorPayload
+}
+
+// =====================================================
+// MARK: - MESSAGE
+// =====================================================
+
+public struct DVSMMessage {
+
+    public let identity: DVSMExecutionIdentity
+    public let payload: [UInt8]
+}
+
+// =====================================================
+// MARK: - VECTOR PAYLOAD
+// =====================================================
+
+public struct DVSMVectorPayload {
+
+    public let id: String
+    public let vector: [Float]
+    public let timestamp: UInt64
+    public let signature: [UInt8]
+}
+
+// =====================================================
+// MARK: - SHARD CONTEXT
+// =====================================================
+
+public struct DVSMShardContext {
+
+    public let shardID: String
+    public let version: UInt64
+    public let verified: Bool
+}
+
+// =====================================================
+// MARK: - MANIFOLD
+// =====================================================
+
+public struct DVSMManifold {
+
+    public func project(
+        vector: [Float],
+        mode: DVSMExecutionMode
+    ) -> [Float] {
+
+        switch mode {
+        case .strict: return vector
+        case .hybrid: return vector.map { $0 + 0.001 }
+        case .adaptive: return vector
+        }
+    }
+}
+
+// =====================================================
+// MARK: - RATCHET (NOW IDENTITY-BOUND)
+// =====================================================
+
+public final class DVSMRatchet {
+
+    private var state: Data
+
+    public init(seed: Data) {
+        self.state = seed
+    }
+
+    public func advance(
+        identity: DVSMExecutionIdentity,
+        context: Data
+    ) -> Data {
+
+        var buffer = Data()
+        buffer.append(state)
+        buffer.append(context)
+        buffer.append(identity.id.uuidString.data(using: .utf8)!)
+
+        let hash = SHA256.hash(data: buffer)
+        let next = Data(hash)
+
+        state = next
+        return next
+    }
+}
+
+// =====================================================
+// MARK: - RING DISRUPTOR
+// =====================================================
+
+public final class DVSMRingDisruptor {
+
+    private var slots: [DVSMMessage?]
+    private let sizeMask: Int
+
+    private(set) var cursor: UInt64 = 0
+    private(set) var head: UInt64 = 0
+    private(set) var tail: UInt64 = 0
+
+    public init(size: Int) {
+        self.slots = Array(repeating: nil, count: size)
+        self.sizeMask = size - 1
+    }
+
+    public func claim() -> UInt64 {
+        let seq = tail
+        tail += 1
+        return seq
+    }
+
+    public func publish(
+        sequence: UInt64,
+        message: DVSMMessage
+    ) {
+        let index = Int(sequence) & sizeMask
+        slots[index] = message
+        cursor = sequence
+    }
+
+    public func nextWindow(max: Int) -> [DVSMMessage] {
+
+        let available = min(Int(cursor - head + 1), max)
+        guard available > 0 else { return [] }
+
+        var out: [DVSMMessage] = []
+
+        for i in 0..<available {
+            let index = Int(head + UInt64(i)) & sizeMask
+            if let msg = slots[index] {
+                out.append(msg)
+            }
+        }
+
+        return out
+    }
+
+    public func advance(_ n: Int) {
+        head += UInt64(n)
+    }
+}
+
+// =====================================================
+// MARK: - MESSAGE ARENA
+// =====================================================
+
+public final class DVSMMessageArena {
+
+    private var storage: [DVSMMessage] = []
+
+    public func allocate(
+        identity: DVSMExecutionIdentity,
+        payload: [UInt8]
+    ) -> DVSMMessage {
+
+        let msg = DVSMMessage(
+            identity: identity,
+            payload: payload
+        )
+
+        storage.append(msg)
+        return msg
+    }
+
+    public func reset() {
+        storage.removeAll(keepingCapacity: true)
+    }
+}
+
+// =====================================================
+// MARK: - COMMIT PIPELINE
+// =====================================================
+
+public final class DVSMCommitPipeline {
+
+    public func commit(
+        window: [DVSMMessage]
+    ) -> Data {
+
+        var buffer = Data()
+
+        for msg in window {
+            buffer.append(contentsOf: msg.payload)
+        }
+
+        return Data(SHA256.hash(data: buffer))
+    }
+}
+
+// =====================================================
+// MARK: - EXECUTION FABRIC
+// =====================================================
+
+public final class DVSMExecutionFabric {
+
+    public let mode: DVSMExecutionMode
+    public let policy: DVSMExecutionPolicy
+
+    public let manifold = DVSMManifold()
+    public let disruptor: DVSMRingDisruptor
+    public let ratchet: DVSMRatchet
+    public let commitPipeline = DVSMCommitPipeline()
+    public let arena = DVSMMessageArena()
+
+    private(set) public var currentRoot: Data
+
+    public init(
+        mode: DVSMExecutionMode,
+        policy: DVSMExecutionPolicy,
+        ringSize: Int,
+        seed: Data
+    ) {
+        self.mode = mode
+        self.policy = policy
+        self.disruptor = DVSMRingDisruptor(size: ringSize)
+        self.ratchet = DVSMRatchet(seed: seed)
+        self.currentRoot = Data("GENESIS".utf8)
+    }
+
+    // =================================================
+    // INGESTION (NOW STANDARDIZED)
+    // =================================================
+
+    public func ingest(
+        payload: DVSMVectorPayload,
+        shardID: String,
+        sequence: UInt64,
+        instability: Float,
+        confidence: Float,
+        reliability: Float
+    ) -> Bool {
+
+        guard policy.validate(
+            instability: instability,
+            confidence: confidence,
+            reliability: reliability
+        ) else { return false }
+
+        let identity = DVSMExecutionIdentity(
+            shardID: shardID,
+            sequence: sequence,
+            timestamp: payload.timestamp
+        )
+
+        let transformed = manifold.project(
+            vector: payload.vector,
+            mode: mode
+        )
+
+        let encoded = encode(payload.id, transformed)
+
+        let message = arena.allocate(
+            identity: identity,
+            payload: encoded
+        )
+
+        let seq = disruptor.claim()
+
+        disruptor.publish(
+            sequence: seq,
+            message: message
+        )
+
+        return true
+    }
+
+    // =================================================
+    // EXECUTION WINDOW
+    // =================================================
+
+    public func run(maxBatch: Int) -> Data? {
+
+        let window = disruptor.nextWindow(max: maxBatch)
+        guard !window.isEmpty else { return nil }
+
+        let root = commitPipeline.commit(window: window)
+
+        _ = ratchet.advance(
+            identity: window.first!.identity,
+            context: root
+        )
+
+        currentRoot = root
+        disruptor.advance(window.count)
+
+        return root
+    }
+}
+
+// =====================================================
+// ENCODING
+// =====================================================
+
+private func encode(_ id: String, _ vector: [Float]) -> [UInt8] {
+
+    var out: [UInt8] = Array(id.utf8)
+
+    for v in vector {
+        let bits = v.bitPattern
+        out.append(contentsOf: [
+            UInt8(bits),
+            UInt8(bits >> 8),
+            UInt8(bits >> 16),
+            UInt8(bits >> 24)
+        ])
+    }
+
+    return out
+}
