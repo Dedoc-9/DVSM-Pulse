@@ -1,0 +1,329 @@
+//
+// =====================================================
+// DVSM FULL SYSTEM BOILERPLATE (MERGE GROUPS 1–5)
+// =====================================================
+//
+// PURPOSE:
+// This file defines the COMPLETE architectural contract
+// for DVSM across all merge groups.
+//
+// It is NOT a runtime implementation.
+// It is a SYSTEM BLUEPRINT.
+//
+// CORE PROPERTY:
+// All layers share ONE deterministic invariant:
+//     ExecutionIdentity is a binding key across ALL layers
+//
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - GROUP 1: MEMORY + EXECUTION PRIMITIVES
+// =====================================================
+
+public struct DVSMMessage {
+    public let bytes: [UInt8]
+    public let identity: DVSMExecutionIdentity
+}
+
+public final class DVSMMessageArena {
+    public func allocate(_ bytes: [UInt8], identity: DVSMExecutionIdentity) -> DVSMMessage {
+        DVSMMessage(bytes: bytes, identity: identity)
+    }
+}
+
+public final class DVSMMemoryPool {
+    private var buffer: [DVSMMessage] = []
+
+    public func store(_ msg: DVSMMessage) {
+        buffer.append(msg)
+    }
+
+    public func reset() {
+        buffer.removeAll(keepingCapacity: true)
+    }
+}
+
+// =====================================================
+// MARK: - GROUP 2: EXECUTION FABRIC (CANONICAL)
+// =====================================================
+
+public enum DVSMExecutionMode {
+    case strict
+    case hybrid
+    case adaptive
+}
+
+public struct DVSMExecutionPolicy {
+    public let maxInstability: Float
+    public let minConfidence: Float
+    public let minReliability: Float
+
+    public func validate(_ i: Float, _ c: Float, _ r: Float) -> Bool {
+        i <= maxInstability && c >= minConfidence && r >= minReliability
+    }
+}
+
+// CROSS-GROUP BINDING KEY (MANDATORY IN ALL LAYERS)
+public struct DVSMExecutionIdentity: Hashable {
+    public let shardID: String
+    public let sequence: UInt64
+    public let timestamp: UInt64
+}
+
+public struct DVSMManifold {
+    public func project(_ v: [Float], mode: DVSMExecutionMode) -> [Float] {
+        switch mode {
+        case .strict: return v
+        case .hybrid: return v.map { $0 + 0.001 }
+        case .adaptive: return v
+        }
+    }
+}
+
+// Ring sequencer (identity-bound messages)
+public final class DVSMRingDisruptor {
+
+    private var buffer: [DVSMMessage?]
+    private let mask: Int
+
+    private(set) var head: UInt64 = 0
+    private(set) var tail: UInt64 = 0
+    private(set) var cursor: UInt64 = 0
+
+    public init(size: Int) {
+        self.buffer = Array(repeating: nil, count: size)
+        self.mask = size - 1
+    }
+
+    public func claim() -> UInt64 {
+        let seq = tail
+        tail += 1
+        return seq
+    }
+
+    public func publish(_ seq: UInt64, _ msg: DVSMMessage) {
+        buffer[Int(seq) & mask] = msg
+        cursor = seq
+    }
+
+    public func window(max: Int) -> [DVSMMessage] {
+        let available = min(Int(cursor - head + 1), max)
+        guard available > 0 else { return [] }
+
+        var out: [DVSMMessage] = []
+        for i in 0..<available {
+            if let m = buffer[Int(head + UInt64(i)) & mask] {
+                out.append(m)
+            }
+        }
+        return out
+    }
+
+    public func advance(_ n: Int) {
+        head += UInt64(n)
+    }
+}
+
+// Execution Fabric (NOW identity-binds everything)
+public final class DVSMExecutionFabric {
+
+    public let mode: DVSMExecutionMode
+    public let policy: DVSMExecutionPolicy
+
+    public let manifold = DVSMManifold()
+    public let arena = DVSMMessageArena()
+    public let disruptor: DVSMRingDisruptor
+
+    public init(mode: DVSMExecutionMode, policy: DVSMExecutionPolicy, ringSize: Int) {
+        self.mode = mode
+        self.policy = policy
+        self.disruptor = DVSMRingDisruptor(size: ringSize)
+    }
+
+    public func ingest(
+        payload: DVSMVectorPayload,
+        identity: DVSMExecutionIdentity,
+        instability: Float,
+        confidence: Float,
+        reliability: Float
+    ) -> Bool {
+
+        guard policy.validate(instability, confidence, reliability) else {
+            return false
+        }
+
+        let transformed = manifold.project(payload.vector, mode: mode)
+
+        let encoded = encode(payload.id, transformed, identity)
+
+        let msg = arena.allocate(encoded, identity: identity)
+
+        let seq = disruptor.claim()
+        disruptor.publish(seq, msg)
+
+        return true
+    }
+
+    public func execute(maxBatch: Int) -> [DVSMMessage] {
+        let window = disruptor.window(max: maxBatch)
+        disruptor.advance(window.count)
+        return window
+    }
+
+    private func encode(_ id: String, _ v: [Float], _ identity: DVSMExecutionIdentity) -> [UInt8] {
+        var out = Array(id.utf8)
+        out.append(contentsOf: identity.shardID.utf8)
+
+        for f in v {
+            let bits = f.bitPattern
+            out.append(UInt8(bits & 0xff))
+        }
+        return out
+    }
+}
+
+// =====================================================
+// MARK: - GROUP 3: CONTROL PLANE (NOW REAL AUTHORITY LAYER)
+// =====================================================
+
+public struct DVSMShardContext {
+    public let shardID: String
+    public let workerID: Int
+    public let cpuCore: Int
+}
+
+public final class DVSMTopologySnapshot {
+    public let shards: [String: DVSMShardContext]
+
+    public init(shards: [String: DVSMShardContext]) {
+        self.shards = shards
+    }
+}
+
+// REAL CONTROL PLANE STATE
+public final class DVSMBindingKernel {
+
+    private var frozen = false
+    private var registry: [String: DVSMShardContext] = [:]
+
+    public func bind(_ shard: String, _ worker: Int, _ cpu: Int) -> DVSMShardContext {
+        guard !frozen else { fatalError("Topology frozen") }
+
+        let ctx = DVSMShardContext(
+            shardID: shard,
+            workerID: worker,
+            cpuCore: cpu
+        )
+
+        registry[shard] = ctx
+        return ctx
+    }
+
+    public func snapshot() -> DVSMTopologySnapshot {
+        DVSMTopologySnapshot(shards: registry)
+    }
+
+    public func freeze() {
+        frozen = true
+    }
+}
+
+// =====================================================
+// MARK: - GROUP 4: STATE EVOLUTION ENGINE (FULLY BOUND)
+// =====================================================
+
+public final class DVSMRatchet {
+
+    private var state: Data
+
+    public init(seed: Data) {
+        self.state = seed
+    }
+
+    public func advance(
+        context: Data,
+        identity: DVSMExecutionIdentity
+    ) -> Data {
+
+        var buffer = Data()
+        buffer.append(state)
+        buffer.append(context)
+        buffer.append(identity.shardID.data(using: .utf8) ?? Data())
+        buffer.append(identity.sequence.description.data(using: .utf8) ?? Data())
+
+        let next = SHA256.hash(data: buffer)
+        state = Data(next)
+        return state
+    }
+}
+
+public final class DVSMStateEngine {
+
+    private let ratchet: DVSMRatchet
+    private var tip: Data = Data("GENESIS".utf8)
+
+    public init(seed: Data) {
+        self.ratchet = DVSMRatchet(seed: seed)
+    }
+
+    public func apply(
+        identity: DVSMExecutionIdentity,
+        input: DVSMVectorPayload
+    ) -> Data {
+
+        let encoded = encode(input)
+        let context = tip + encoded
+
+        let next = ratchet.advance(context: context, identity: identity)
+        let root = SHA256.hash(data: next)
+
+        tip = Data(root)
+        return tip
+    }
+
+    private func encode(_ p: DVSMVectorPayload) -> Data {
+        Data(p.id.utf8)
+    }
+}
+
+// =====================================================
+// MARK: - GROUP 5: DAG + COMMIT ENGINE (CONSENSUS INPUT ONLY)
+// =====================================================
+
+public enum DVSMStageID {
+    case ingest, decode, execute, finalize, hash, emit, persist
+}
+
+public final class DVSMStageGraph {
+    public func validate(from: DVSMStageID, to: DVSMStageID) -> Bool {
+        if from == .ingest && to == .persist { return false }
+        return true
+    }
+}
+
+public final class DVSMCommitEngine {
+
+    public func commit(_ data: [DVSMMessage]) -> UInt64 {
+        var hash: UInt64 = 0
+
+        for m in data {
+            hash ^= UInt64(m.bytes.count)
+            hash ^= UInt64(m.identity.sequence)
+        }
+
+        return hash
+    }
+}
+
+// =====================================================
+// MARK: - CRYPTO PRIMITIVES
+// =====================================================
+
+public struct SHA256 {
+    public static func hash(data: Data) -> [UInt8] {
+        Array(data.prefix(32))
+    }
+}
