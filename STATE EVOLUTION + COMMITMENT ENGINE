@@ -1,0 +1,269 @@
+//
+// =====================================================
+// DVSM MERGE GROUP 4 — STATE EVOLUTION + COMMITMENT ENGINE
+// =====================================================
+
+import Foundation
+
+// =====================================================
+// MARK: - EXECUTION DOMAIN MODEL
+// =====================================================
+
+public enum DVSMExecutionDomain: UInt8 {
+    case hot
+    case mid
+    case cold
+}
+
+// =====================================================
+// MARK: - STAGE GRAPH
+// =====================================================
+
+public enum DVSMStageID: UInt8 {
+    case ingest
+    case decode
+    case execute
+    case batchFinalize
+    case cryptoHash
+    case consensusEmit
+    case persist
+}
+
+// =====================================================
+// MARK: - STAGE
+// =====================================================
+
+public struct DVSMStage {
+    public let id: DVSMStageID
+    public let domain: DVSMExecutionDomain
+    public let name: String
+}
+
+// =====================================================
+// MARK: - EXECUTION DAG
+// =====================================================
+
+public final class DVSMStageGraph {
+
+    private let stages: [DVSMStage] = [
+        DVSMStage(id: .ingest, domain: .hot, name: "ingest"),
+        DVSMStage(id: .decode, domain: .hot, name: "decode"),
+        DVSMStage(id: .execute, domain: .mid, name: "execute"),
+        DVSMStage(id: .batchFinalize, domain: .mid, name: "batch_finalize"),
+        DVSMStage(id: .cryptoHash, domain: .mid, name: "crypto_hash"),
+        DVSMStage(id: .consensusEmit, domain: .cold, name: "consensus_emit"),
+        DVSMStage(id: .persist, domain: .cold, name: "persist")
+    ]
+
+    public init() {}
+
+    public func stage(_ id: DVSMStageID) -> DVSMStage? {
+        guard Int(id.rawValue) < stages.count else { return nil }
+        return stages[Int(id.rawValue)]
+    }
+
+    public func validateTransition(from: DVSMStageID, to: DVSMStageID) -> Bool {
+        guard let f = stage(from), let t = stage(to) else { return false }
+
+        if f.domain == .hot && t.domain == .cold {
+            return false
+        }
+
+        return true
+    }
+}
+
+// =====================================================
+// MARK: - EXECUTION PAYLOAD (UNMODIFIED INPUT SURFACE)
+// =====================================================
+
+public struct DVSMVectorPayload {
+    public let id: String
+    public let vector: [Float]
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - EXECUTION IDENTITY (FROM GROUP 3)
+// =====================================================
+//
+// THIS IS THE CRITICAL CROSS-GROUP BINDING KEY
+// =====================================================
+
+public struct DVSMExecutionIdentity:
+    Hashable,
+    Codable,
+    Sendable {
+
+    public let shard: String
+    public let generation: UInt64
+    public let worker: Int
+
+    public init(shard: String, generation: UInt64, worker: Int) {
+        self.shard = shard
+        self.generation = generation
+        self.worker = worker
+    }
+}
+
+// =====================================================
+// MARK: - RATCHET ENGINE (IDENTITY SCOPED)
+// =====================================================
+
+public final class DVSMRatchet {
+
+    private var state: Data
+
+    public init(seed: Data) {
+        self.state = seed
+    }
+
+    public func advance(identity: DVSMExecutionIdentity, context: Data) -> Data {
+
+        var combined = Data()
+        combined.append(state)
+        combined.append(context)
+        combined.append(identity.shard.data(using: .utf8) ?? Data())
+
+        let next = SHA256.hash(data: combined)
+
+        state = Data(next)
+        return state
+    }
+
+    public func current() -> Data {
+        state
+    }
+}
+
+// =====================================================
+// MARK: - STATE ENGINE (NOW IDENTITY-AWARE)
+// =====================================================
+
+public final class DVSMStateEngine {
+
+    private let graph: DVSMStageGraph
+    private let ratchet: DVSMRatchet
+
+    private var stateTip: Data
+
+    public init(seed: Data) {
+        self.graph = DVSMStageGraph()
+        self.ratchet = DVSMRatchet(seed: seed)
+        self.stateTip = Data("GENESIS".utf8)
+    }
+
+    // -------------------------------------------------
+    // EXECUTION BECOMES IDENTITY-SCOPED STATE EVOLUTION
+    // -------------------------------------------------
+
+    public func execute(
+        identity: DVSMExecutionIdentity,
+        payload: DVSMVectorPayload
+    ) -> String {
+
+        let encoded = encode(payload: payload)
+
+        let context = stateTip + encoded
+
+        let nextContext = ratchet.advance(
+            identity: identity,
+            context: context
+        )
+
+        let root = SHA256.hash(data: nextContext)
+
+        stateTip = Data(root)
+
+        return hex(root)
+    }
+
+    // -------------------------------------------------
+    // DETERMINISTIC ENCODING
+    // -------------------------------------------------
+
+    private func encode(payload: DVSMVectorPayload) -> Data {
+
+        var out = Data()
+        out.append(payload.id.data(using: .utf8) ?? Data())
+
+        for v in payload.vector {
+            var f = v.bitPattern.littleEndian
+            withUnsafeBytes(of: &f) { out.append(contentsOf: $0) }
+        }
+
+        return out
+    }
+
+    public func currentRoot() -> Data {
+        stateTip
+    }
+
+    private func hex(_ bytes: [UInt8]) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+// =====================================================
+// MARK: - COMMIT PIPELINE (IDENTITY SCOPED)
+// =====================================================
+
+public final class DVSMCommitPipeline {
+
+    public init() {}
+
+    public func commit(
+        identity: DVSMExecutionIdentity,
+        inputs: [Data]
+    ) -> UInt64 {
+
+        var hasher = FNV64a()
+
+        // identity binds the commit root to execution lineage
+        hasher.write(identity.shard.data(using: .utf8) ?? Data())
+
+        for input in inputs {
+            hasher.write(input)
+        }
+
+        return hasher.finalize()
+    }
+}
+
+// =====================================================
+// MARK: - TOPOLOGY SNAPSHOT (CONSUMPTION VIEW ONLY)
+// =====================================================
+
+public struct DVSMTopologySnapshot {
+    public let shardMap: [String: String]
+
+    public init(shardMap: [String: String]) {
+        self.shardMap = shardMap
+    }
+}
+
+// =====================================================
+// MARK: - HASH PRIMITIVES (STANDIN)
+// =====================================================
+
+public struct SHA256 {
+    public static func hash(data: Data) -> [UInt8] {
+        Array(data.prefix(32))
+    }
+}
+
+public struct FNV64a {
+
+    private var hash: UInt64 = 1469598103934665603
+
+    public mutating func write(_ data: Data) {
+        for b in data {
+            hash ^= UInt64(b)
+            hash &*= 1099511628211
+        }
+    }
+
+    public func finalize() -> UInt64 {
+        hash
+    }
+}
