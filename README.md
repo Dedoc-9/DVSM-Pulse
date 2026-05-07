@@ -1,5 +1,4 @@
 // Author: Daniel J. Dillberg
-//
 // =====================================================
 // DVSM SYSTEM SPECIFICATION SDK
 // Deterministic Distributed Execution Architecture (G1–G6)
@@ -176,7 +175,7 @@ public enum DVSMExecutionMode {
 //
 // State is:
 //
-// ✔ not mutable across history
+// ✔ immutable across history
 // ✔ cryptographically chained
 // ✔ reconstructible from transitions
 //
@@ -214,7 +213,7 @@ public final class DVSMTopologySnapshot {
 // MARK: - SEMANTIC LAYER INTEGRATION (G6)
 // =====================================================
 //
-// G6 is READ-ONLY over:
+// G6 is strictly READ-ONLY over:
 //
 // - G4 commit roots
 // - G3 shard ordering metadata
@@ -224,23 +223,35 @@ public final class DVSMTopologySnapshot {
 //
 // ✔ vector projection
 // ✔ retrieval abstraction
-// ✔ semantic reconstruction
+// ✔ semantic interpretation of already-committed state
 //
-// BUT CANNOT:
+// -----------------------------------------------------
 //
-// ❌ influence execution
-// ❌ modify state
-// ❌ alter ordering
+// G6 GUARANTEES:
 //
-// - Can run alongside systems that provide those 
-// - Cannot let them touch a deterministic domain
-// - DVSM is the deterministic core
-// - Example safe setups:
-// - 1. DVSM + Kubernetes scheduler
-// - Kubernetes decides where pods run
-// - DVSM ignores that and enforces its own shard→CPU binding internally
+// ✔ cannot influence execution (G2)
+// ✔ cannot modify state (G4)
+// ✔ cannot alter ordering (G3)
+//
+// -----------------------------------------------------
+//
+// COEXISTENCE MODEL:
+//
+// G6 may operate alongside external systems
+// (e.g. schedulers, orchestrators), but:
+//
+// → those systems are outside DVSM control
+// → DVSM ignores external scheduling decisions
+// → DVSM maintains its own deterministic binding rules internally
+//
+// Example:
+//
+// - Kubernetes schedules compute placement externally
+// - DVSM independently enforces shard→execution binding
+// - No external system can alter DVSM determinism
 //
 // =====================================================
+
 // =====================================================
 // MARK: - SYSTEM SECURITY MODEL
 // =====================================================
@@ -248,14 +259,14 @@ public final class DVSMTopologySnapshot {
 // DVSM security is structural:
 //
 // Instead of preventing invalid state,
-// it prevents invalid state from being representable.
+// it ensures invalid state cannot be represented.
 //
 // GUARANTEES:
 //
 // ✔ no cross-shard mutation
 // ✔ no execution reordering ambiguity
 // ✔ no inconsistent commit acceptance
-// ✔ no semantic feedback loops into execution
+// ✔ no semantic feedback into execution graph
 //
 // =====================================================
 
@@ -275,7 +286,7 @@ public final class DVSMTopologySnapshot {
 //     latency = probabilistic + contention-driven tail risk
 //
 // DVSM:
-//     latency = bounded + structurally enforced
+//     latency = bounded + structurally constrained
 //
 // =====================================================
 
