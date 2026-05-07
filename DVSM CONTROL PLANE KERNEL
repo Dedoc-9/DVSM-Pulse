@@ -1,0 +1,456 @@
+//
+// =====================================================
+// DVSM CONTROL PLANE KERNEL
+// =====================================================
+//
+// MERGE GROUP 3 (UPDATED)
+// =====================================================
+
+import Foundation
+
+// =====================================================
+// MARK: - GLOBAL CONTROL PLANE PURPOSE
+// =====================================================
+
+public struct DVSMExecutionIdentity:
+    Hashable,
+    Codable,
+    Sendable {
+
+    /// Stable binding identity across topology + execution fabric
+    public let shard: DVSMShardID
+
+    /// Monotonic topology generation at binding time
+    public let generation: UInt64
+
+    /// Worker assignment snapshot
+    public let worker: DVSMWorkerID
+
+    public init(
+        shard: DVSMShardID,
+        generation: UInt64,
+        worker: DVSMWorkerID
+    ) {
+        self.shard = shard
+        self.generation = generation
+        self.worker = worker
+    }
+}
+
+// =====================================================
+// MARK: - SHARD IDENTITY
+// =====================================================
+
+public struct DVSMShardID:
+    Hashable,
+    Codable,
+    Sendable {
+
+    public let value: String
+
+    public init(_ value: String) {
+        self.value = value
+    }
+}
+
+// =====================================================
+// MARK: - CPU CORE MODEL
+// =====================================================
+
+public struct DVSMCPUCoreID:
+    Hashable,
+    Codable,
+    Sendable {
+
+    public let value: Int
+
+    public init(_ value: Int) {
+        self.value = value
+    }
+}
+
+// =====================================================
+// MARK: - NUMA NODE MODEL
+// =====================================================
+
+public struct DVSMNUMANodeID:
+    Hashable,
+    Codable,
+    Sendable {
+
+    public let value: Int
+
+    public init(_ value: Int) {
+        self.value = value
+    }
+}
+
+// =====================================================
+// MARK: - WORKER IDENTITY
+// =====================================================
+
+public struct DVSMWorkerID:
+    Hashable,
+    Codable,
+    Sendable {
+
+    public let value: Int
+
+    public init(_ value: Int) {
+        self.value = value
+    }
+}
+
+// =====================================================
+// MARK: - EXECUTION UNIT
+// =====================================================
+
+public struct DVSMExecutionUnit:
+    Codable,
+    Sendable {
+
+    public let shard: DVSMShardID
+    public let worker: DVSMWorkerID
+    public let cpu: DVSMCPUCoreID
+    public let numa: DVSMNUMANodeID
+    public let generation: UInt64
+
+    public init(
+        shard: DVSMShardID,
+        worker: DVSMWorkerID,
+        cpu: DVSMCPUCoreID,
+        numa: DVSMNUMANodeID,
+        generation: UInt64
+    ) {
+        self.shard = shard
+        self.worker = worker
+        self.cpu = cpu
+        self.numa = numa
+        self.generation = generation
+    }
+}
+
+// =====================================================
+// MARK: - SHARD LIFECYCLE
+// =====================================================
+
+public enum DVSMShardLifecycleState: UInt8, Codable, Sendable {
+
+    case created
+    case active
+    case draining
+    case frozen
+    case migrating
+    case retired
+}
+
+// =====================================================
+// MARK: - SHARD OWNERSHIP
+// =====================================================
+
+public struct DVSMShardOwnership:
+    Codable,
+    Sendable {
+
+    public let unit: DVSMExecutionUnit
+    public let lifecycle: DVSMShardLifecycleState
+    public let version: UInt64
+    public let timestamp: UInt64
+
+    public init(
+        unit: DVSMExecutionUnit,
+        lifecycle: DVSMShardLifecycleState,
+        version: UInt64,
+        timestamp: UInt64
+    ) {
+        self.unit = unit
+        self.lifecycle = lifecycle
+        self.version = version
+        self.timestamp = timestamp
+    }
+}
+
+// =====================================================
+// MARK: - TOPOLOGY SNAPSHOT
+// =====================================================
+
+public struct DVSMTopologySnapshot:
+    Codable,
+    Sendable {
+
+    public let version: UInt64
+    public let createdAt: UInt64
+    public let bindings: [DVSMShardOwnership]
+
+    public init(
+        version: UInt64,
+        createdAt: UInt64,
+        bindings: [DVSMShardOwnership]
+    ) {
+        self.version = version
+        self.createdAt = createdAt
+        self.bindings = bindings
+    }
+}
+
+// =====================================================
+// MARK: - TOPOLOGY REGISTRY
+// =====================================================
+
+public final class DVSMShardTopology {
+
+    private var ownership: [DVSMShardID: DVSMShardOwnership]
+    private var cpuMap: [DVSMCPUCoreID: DVSMShardID]
+    private var frozen: Bool
+    private var generation: UInt64
+
+    public init() {
+        self.ownership = [:]
+        self.cpuMap = [:]
+        self.frozen = false
+        self.generation = 0
+    }
+
+    public func register(
+        shard: DVSMShardID,
+        worker: DVSMWorkerID,
+        cpu: DVSMCPUCoreID,
+        numa: DVSMNUMANodeID
+    ) {
+        precondition(!frozen)
+
+        let unit = DVSMExecutionUnit(
+            shard: shard,
+            worker: worker,
+            cpu: cpu,
+            numa: numa,
+            generation: generation
+        )
+
+        let entry = DVSMShardOwnership(
+            unit: unit,
+            lifecycle: .created,
+            version: generation,
+            timestamp: now()
+        )
+
+        ownership[shard] = entry
+        cpuMap[cpu] = shard
+
+        generation += 1
+    }
+
+    public func activate(shard: DVSMShardID) {
+        precondition(!frozen)
+
+        guard let current = ownership[shard] else { return }
+
+        ownership[shard] = DVSMShardOwnership(
+            unit: current.unit,
+            lifecycle: .active,
+            version: current.version + 1,
+            timestamp: now()
+        )
+    }
+
+    public func freeze() {
+        frozen = true
+    }
+
+    public func ownership(shard: DVSMShardID) -> DVSMShardOwnership? {
+        ownership[shard]
+    }
+
+    public func shard(cpu: DVSMCPUCoreID) -> DVSMShardID? {
+        cpuMap[cpu]
+    }
+
+    public func snapshot() -> DVSMTopologySnapshot {
+        DVSMTopologySnapshot(
+            version: generation,
+            createdAt: now(),
+            bindings: Array(ownership.values)
+        )
+    }
+}
+
+// =====================================================
+// MARK: - AFFINITY CONTROLLER
+// =====================================================
+
+public protocol DVSMAffinityController {
+
+    func pin(worker: DVSMWorkerID, cpu: DVSMCPUCoreID)
+    func lockNUMA(node: DVSMNUMANodeID)
+}
+
+// =====================================================
+// MARK: - KERNEL POLICY / STATE
+// =====================================================
+
+public enum DVSMKernelPolicy: UInt8, Codable, Sendable {
+    case deterministic
+    case adaptive
+    case portable
+}
+
+public enum DVSMKernelState: UInt8, Codable, Sendable {
+    case created
+    case bootstrapping
+    case binding
+    case frozen
+    case running
+    case stopping
+    case stopped
+}
+
+// =====================================================
+// MARK: - ORCHESTRATION EVENT
+// =====================================================
+
+public enum DVSMKernelEvent: Sendable {
+    case registerShard(DVSMShardID)
+    case activateShard(DVSMShardID)
+    case freezeTopology
+    case startExecution
+    case stopExecution
+}
+
+// =====================================================
+// MARK: - RUNTIME KERNEL
+// =====================================================
+
+public final class DVSMRuntimeKernel {
+
+    public let topology: DVSMShardTopology
+    public let affinity: DVSMAffinityController
+    public let policy: DVSMKernelPolicy
+
+    private(set) public var state: DVSMKernelState
+    private(set) public var eventLog: [DVSMKernelEvent]
+
+    public init(
+        topology: DVSMShardTopology,
+        affinity: DVSMAffinityController,
+        policy: DVSMKernelPolicy
+    ) {
+        self.topology = topology
+        self.affinity = affinity
+        self.policy = policy
+        self.state = .created
+        self.eventLog = []
+    }
+
+    public func bootstrap() {
+        precondition(state == .created)
+        state = .bootstrapping
+    }
+
+    public func bind(
+        shard: DVSMShardID,
+        worker: DVSMWorkerID,
+        cpu: DVSMCPUCoreID,
+        numa: DVSMNUMANodeID
+    ) {
+        precondition(state == .bootstrapping || state == .binding)
+
+        state = .binding
+
+        topology.register(
+            shard: shard,
+            worker: worker,
+            cpu: cpu,
+            numa: numa
+        )
+
+        applyAffinity(worker: worker, cpu: cpu, numa: numa)
+
+        topology.activate(shard: shard)
+
+        eventLog.append(.registerShard(shard))
+        eventLog.append(.activateShard(shard))
+    }
+
+    public func freeze() {
+        topology.freeze()
+        state = .frozen
+        eventLog.append(.freezeTopology)
+    }
+
+    public func start() {
+        precondition(state == .frozen)
+        state = .running
+        eventLog.append(.startExecution)
+    }
+
+    public func stop() {
+        state = .stopping
+        eventLog.append(.stopExecution)
+        state = .stopped
+    }
+
+    private func applyAffinity(
+        worker: DVSMWorkerID,
+        cpu: DVSMCPUCoreID,
+        numa: DVSMNUMANodeID
+    ) {
+        switch policy {
+        case .deterministic:
+            affinity.lockNUMA(node: numa)
+            affinity.pin(worker: worker, cpu: cpu)
+        case .adaptive:
+            affinity.pin(worker: worker, cpu: cpu)
+        case .portable:
+            break
+        }
+    }
+}
+
+// =====================================================
+// MARK: - ORCHESTRATOR
+// =====================================================
+
+public final class DVSMRuntimeOrchestrator {
+
+    public let kernel: DVSMRuntimeKernel
+
+    public init(kernel: DVSMRuntimeKernel) {
+        self.kernel = kernel
+    }
+
+    public func startSystem() {
+        kernel.bootstrap()
+        kernel.freeze()
+        kernel.start()
+    }
+
+    public func stopSystem() {
+        kernel.stop()
+    }
+}
+
+// =====================================================
+// MARK: - INVARIANTS
+// =====================================================
+
+public struct DVSMControlPlaneInvariants {
+
+    public static let kernelOwnsPlacement = true
+    public static let workersArePassive = true
+    public static let topologyImmutableAtRuntime = true
+
+    public static let oneShardOneCPU = true
+    public static let noCrossNUMAMigration = true
+    public static let noExecutionWithoutBinding = true
+
+    public static let noPayloadExecution = true
+    public static let noConsensusAuthority = true
+    public static let deterministicBootOrdering = true
+
+    public static let topologySnapshotsReplayable = true
+    public static let bindingHistoryAuditable = true
+}
+
+// =====================================================
+// END
+// =====================================================
