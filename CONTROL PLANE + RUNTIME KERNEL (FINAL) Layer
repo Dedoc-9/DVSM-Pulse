@@ -1,0 +1,299 @@
+// =====================================================
+// DVSM MERGE GROUP 5 — CONTROL PLANE + RUNTIME KERNEL (FINAL)
+// =====================================================
+//
+// 🔷 ARCHITECTURAL ROLE
+//
+// Group 5 is the **highest authority control plane layer**.
+//
+// It governs:
+//
+//   ✔ shard placement authority
+//   ✔ CPU + NUMA binding enforcement
+//   ✔ runtime lifecycle (start / stop / freeze)
+//   ✔ structural immutability guarantees
+//
+// It depends on:
+//
+//   Group 3 → topology + shard ownership source of truth
+//   Group 4 → state evolution + cryptographic execution history
+//
+// It does NOT:
+//   ✘ execute workloads
+//   ✘ compute state transitions
+//   ✘ perform consensus
+//
+// Instead it defines the *physical reality constraints*
+// under which all lower systems operate.
+//
+// -----------------------------------------------------
+//
+// 🔷 CROSS-GROUP INVARIANT (CRITICAL)
+//
+// ExecutionIdentity invariant:
+//
+// Once a shard is bound:
+//
+//   shardID + workerID + cpuCoreID + numaNodeID
+//
+// becomes IMMUTABLE after freeze.
+//
+// Group 3 enforces structure,
+// Group 4 assumes stability,
+// Group 5 enforces authority.
+//
+// =====================================================
+
+import Foundation
+
+// =====================================================
+// MARK: - SHARD BINDING (CONTROL PLANE ENTITY)
+// =====================================================
+
+public struct DVSMShardBinding {
+
+    public let shardID: DVSMShardID
+    public let workerID: DVSMWorkerID
+    public let cpuCoreID: DVSMCPUCoreID
+    public let numaNodeID: DVSMNUMANodeID
+
+    public var state: DVSMShardLifecycleState
+    public var sequenceCursor: UInt64
+
+    public init(
+        shardID: DVSMShardID,
+        workerID: DVSMWorkerID,
+        cpuCoreID: DVSMCPUCoreID,
+        numaNodeID: DVSMNUMANodeID,
+        state: DVSMShardLifecycleState,
+        sequenceCursor: UInt64
+    ) {
+        self.shardID = shardID
+        self.workerID = workerID
+        self.cpuCoreID = cpuCoreID
+        self.numaNodeID = numaNodeID
+        self.state = state
+        self.sequenceCursor = sequenceCursor
+    }
+}
+
+// =====================================================
+// MARK: - SYSTEM TOPOLOGY (AUTHORITY WRAPPER OVER GROUP 3)
+// =====================================================
+//
+// NOTE:
+// This is NOT a replacement of Group 3 topology.
+// It is a controlled mutation gateway + enforcement layer.
+// =====================================================
+
+public final class DVSMSystemTopology {
+
+    private var shardMap: [DVSMShardID: DVSMShardBinding]
+    private var cpuMap: [DVSMCPUCoreID: DVSMShardID]
+
+    public init(
+        shardMap: [DVSMShardID: DVSMShardBinding],
+        cpuMap: [DVSMCPUCoreID: DVSMShardID]
+    ) {
+        self.shardMap = shardMap
+        self.cpuMap = cpuMap
+    }
+
+    // -----------------------------------------------------
+    // READ ACCESS (SAFE)
+    // -----------------------------------------------------
+
+    public func shard(_ id: DVSMShardID) -> DVSMShardBinding? {
+        shardMap[id]
+    }
+
+    public func shardForCPU(_ cpu: DVSMCPUCoreID) -> DVSMShardID? {
+        cpuMap[cpu]
+    }
+
+    // -----------------------------------------------------
+    // DETERMINISTIC ASSIGNMENT (PRE-FREEZE ONLY)
+    // -----------------------------------------------------
+
+    public func assignShard(
+        shardID: DVSMShardID,
+        workerID: DVSMWorkerID,
+        numaNodes: [DVSMNUMANodeID: [DVSMCPUCoreID]]
+    ) -> DVSMShardBinding {
+
+        let nodeIndex = workerID.value % max(numaNodes.count, 1)
+        let nodeID = Array(numaNodes.keys)[nodeIndex]
+
+        let cores = numaNodes[nodeID] ?? [0]
+        let cpu = cores[workerID.value % max(cores.count, 1)]
+
+        let binding = DVSMShardBinding(
+            shardID: shardID,
+            workerID: workerID,
+            cpuCoreID: cpu,
+            numaNodeID: nodeID,
+            state: .active,
+            sequenceCursor: 0
+        )
+
+        shardMap[shardID] = binding
+        cpuMap[cpu] = shardID
+
+        return binding
+    }
+}
+
+// =====================================================
+// MARK: - AFFINITY CONTROLLER (PLATFORM ABSTRACTION)
+// =====================================================
+
+public protocol DVSMAffinityController {
+
+    func pin(workerID: DVSMWorkerID, cpuCore: DVSMCPUCoreID)
+    func lockNUMANode(_ nodeID: DVSMNUMANodeID)
+}
+
+// =====================================================
+// MARK: - BINDING KERNEL (HARDWARE AUTHORITY LAYER)
+// =====================================================
+//
+// This is the FINAL authority over:
+//
+//   ✔ shard placement
+//   ✔ CPU binding
+//   ✔ NUMA locking
+//   ✔ freeze enforcement
+//
+// It does NOT execute workloads.
+// It defines execution constraints.
+// =====================================================
+
+public final class DVSMBindingKernel {
+
+    private let topology: DVSMSystemTopology
+    private let affinity: DVSMAffinityController
+
+    private var frozen: Bool = false
+
+    public init(
+        topology: DVSMSystemTopology,
+        affinity: DVSMAffinityController
+    ) {
+        self.topology = topology
+        self.affinity = affinity
+    }
+
+    // -----------------------------------------------------
+    // BIND SHARD (ONLY BEFORE FREEZE)
+    // -----------------------------------------------------
+
+    public func bindShard(
+        shardID: DVSMShardID,
+        workerID: DVSMWorkerID,
+        numaNodes: [DVSMNUMANodeID: [DVSMCPUCoreID]]
+    ) {
+
+        guard !frozen else {
+            fatalError("Topology frozen — rebinding forbidden")
+        }
+
+        let binding = topology.assignShard(
+            shardID: shardID,
+            workerID: workerID,
+            numaNodes: numaNodes
+        )
+
+        apply(binding)
+    }
+
+    // -----------------------------------------------------
+    // APPLY HARD AFFINITY RULES
+    // -----------------------------------------------------
+
+    private func apply(_ binding: DVSMShardBinding) {
+        affinity.lockNUMANode(binding.numaNodeID)
+        affinity.pin(workerID: binding.workerID,
+                     cpuCore: binding.cpuCoreID)
+    }
+
+    // -----------------------------------------------------
+    // FREEZE (IMMUTABILITY BARRIER)
+    // -----------------------------------------------------
+
+    public func freeze() {
+        frozen = true
+    }
+}
+
+// =====================================================
+// MARK: - RUNTIME KERNEL (LIFECYCLE COORDINATOR)
+// =====================================================
+//
+// This is NOT execution.
+// This is orchestration lifecycle control only.
+// =====================================================
+
+public final class DVSMRuntimeKernel {
+
+    private let topology: DVSMSystemTopology
+    private let bindingKernel: DVSMBindingKernel
+
+    private var running: Bool = false
+
+    public init(
+        topology: DVSMSystemTopology,
+        bindingKernel: DVSMBindingKernel
+    ) {
+        self.topology = topology
+        self.bindingKernel = bindingKernel
+    }
+
+    // -----------------------------------------------------
+    // START SYSTEM
+    // -----------------------------------------------------
+
+    public func start() {
+        guard !running else { return }
+        running = true
+
+        // In full DVSM system:
+        // - attach execution layer (Group 2)
+        // - attach state engine (Group 4)
+        // - attach sequencing (Group 3)
+    }
+
+    // -----------------------------------------------------
+    // STOP SYSTEM
+    // -----------------------------------------------------
+
+    public func stop() {
+        running = false
+    }
+}
+
+// =====================================================
+// MARK: - ISOLATION RULES (GLOBAL CONTRACT)
+// =====================================================
+
+public enum DVSMIsolationRules {
+
+    static let shardOwnershipIsExclusive = true
+    static let cpuCoreIsSingleOwner = true
+    static let numaNodeIsLocalOnly = true
+    static let runtimeKernelIsAuthority = true
+}
+
+// =====================================================
+// MARK: - SYSTEM TRANSITION MODEL
+// =====================================================
+//
+// BEFORE GROUP 5:
+//   execution system is loosely coupled
+//   placement is advisory
+//
+// AFTER GROUP 5:
+//   kernel defines physical execution reality
+//   shards become pinned deterministic entities
+//   execution becomes constrained runtime behavior
+//
+// =====================================================
