@@ -1,0 +1,227 @@
+// DVSM SDK v1.0
+//
+// =====================================================
+// DVSM SDK v1.0
+// Deterministic Execution System Interface Layer
+// =====================================================
+//
+// ROLE:
+// This SDK is the ONLY safe interface to DVSM.
+//
+// It defines:
+// - Execution Identity model
+// - Submission API
+// - State evolution interface
+// - Topology binding abstraction
+// - Commit / verification outputs
+//
+// It does NOT execute anything.
+// It defines system guarantees only.
+//
+// =====================================================
+
+import Foundation
+import CryptoKit
+
+// =====================================================
+// MARK: - CORE TYPES
+// =====================================================
+
+public enum DVSMExecutionMode: UInt8 {
+    case strict
+    case hybrid
+    case adaptive
+}
+
+// -----------------------------------------------------
+
+public struct DVSMExecutionIdentity: Hashable {
+    public let shardID: String
+    public let sequence: UInt64
+    public let timestamp: UInt64
+}
+
+// -----------------------------------------------------
+
+public struct DVSMVectorPayload {
+    public let id: String
+    public let vector: [Float]
+    public let timestamp: UInt64
+}
+
+// =====================================================
+// MARK: - RESULT MODEL
+// =====================================================
+
+public struct DVSMResult {
+    public let identity: DVSMExecutionIdentity
+    public let stateRoot: Data
+    public let commitRoot: UInt64
+}
+
+// =====================================================
+// MARK: - POLICY LAYER
+// =====================================================
+
+public struct DVSMExecutionPolicy {
+
+    public let maxInstability: Float
+    public let minConfidence: Float
+    public let minReliability: Float
+
+    public func validate(
+        instability: Float,
+        confidence: Float,
+        reliability: Float
+    ) -> Bool {
+        instability <= maxInstability &&
+        confidence >= minConfidence &&
+        reliability >= minReliability
+    }
+}
+
+// =====================================================
+// MARK: - TOPOLOGY VIEW (READ ONLY)
+// =====================================================
+
+public struct DVSMShardContext {
+    public let shardID: String
+    public let workerID: Int
+    public let cpuCore: Int
+}
+
+// =====================================================
+// MARK: - TOPOLOGY SNAPSHOT
+// =====================================================
+
+public final class DVSMTopologySnapshot {
+
+    public let shards: [String: DVSMShardContext]
+
+    public init(shards: [String: DVSMShardContext]) {
+        self.shards = shards
+    }
+
+    public func shard(_ id: String) -> DVSMShardContext? {
+        shards[id]
+    }
+}
+
+// =====================================================
+// MARK: - EXECUTION CLIENT (SDK ENTRY POINT)
+// =====================================================
+
+public final class DVSMClient {
+
+    // Core config
+    private let mode: DVSMExecutionMode
+    private let policy: DVSMExecutionPolicy
+
+    // Internal deterministic state
+    private var stateTip: Data = Data("GENESIS".utf8)
+
+    public init(
+        mode: DVSMExecutionMode,
+        policy: DVSMExecutionPolicy
+    ) {
+        self.mode = mode
+        self.policy = policy
+    }
+
+    // =================================================
+    // SUBMIT EXECUTION TASK
+    // =================================================
+
+    public func submit(
+        payload: DVSMVectorPayload,
+        identity: DVSMExecutionIdentity,
+        instability: Float,
+        confidence: Float,
+        reliability: Float
+    ) -> DVSMResult? {
+
+        guard policy.validate(
+            instability: instability,
+            confidence: confidence,
+            reliability: reliability
+        ) else {
+            return nil
+        }
+
+        // deterministic encoding
+        let encoded = encode(payload)
+
+        // state transition
+        let context = stateTip + encoded
+        let next = SHA256.hash(data: context)
+
+        stateTip = Data(next)
+
+        // commit derivation (stable hash)
+        let commit = fnv64(identity: identity, data: encoded)
+
+        return DVSMResult(
+            identity: identity,
+            stateRoot: stateTip,
+            commitRoot: commit
+        )
+    }
+
+    // =================================================
+    // STATE QUERY
+    // =================================================
+
+    public func currentState() -> Data {
+        stateTip
+    }
+
+    // =================================================
+    // INTERNAL ENCODING (DETERMINISTIC)
+    // =================================================
+
+    private func encode(_ payload: DVSMVectorPayload) -> Data {
+
+        var out = Data()
+        out.append(payload.id.data(using: .utf8) ?? Data())
+
+        for v in payload.vector {
+            var f = v.bitPattern.littleEndian
+            withUnsafeBytes(of: &f) { out.append(contentsOf: $0) }
+        }
+
+        return out
+    }
+
+    // =================================================
+    // COMMIT HASH (LINEAGE BINDING)
+    // =================================================
+
+    private func fnv64(identity: DVSMExecutionIdentity, data: Data) -> UInt64 {
+
+        var hash: UInt64 = 1469598103934665603
+
+        let idBytes = identity.shardID.utf8
+        for b in idBytes {
+            hash ^= UInt64(b)
+            hash &*= 1099511628211
+        }
+
+        for b in data {
+            hash ^= UInt64(b)
+            hash &*= 1099511628211
+        }
+
+        return hash
+    }
+}
+
+// =====================================================
+// MARK: - CRYPTO PRIMITIVE (SDK STANDIN)
+// =====================================================
+
+public struct SHA256 {
+
+    public static func hash(data: Data) -> [UInt8] {
+        Array(data.prefix(32)) // deterministic placeholder
+    }
+}
